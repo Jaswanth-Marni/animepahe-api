@@ -172,6 +172,7 @@ GET /api/play/download-links?url=https://pahe.win/XYZ # To only get one download
 > - `:session` is the anime's unique identifier
 > - `episodeId` is the episode's unique identifier from the /releases endpoint
 > - Use `downloads=false` for faster responses if you only need streaming links
+> - **Important:** When downloading the direct `.mp4` video (the `download` URL), you MUST pass the provided `downloadPage` URL as the `Referer` header to avoid errors.
 
 ### Queue Status
 ```

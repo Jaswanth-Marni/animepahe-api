@@ -316,18 +316,25 @@ class Animepahe {
             throw new CustomError('URL is required', 400);
         }
 
-        const resolvedUrl = await this.extractKwikUrl(url);
+        const { kwikUrl: resolvedUrl, filename } = await this.extractKwikUrl(url);
         if (!resolvedUrl) {
             // If can't extract the URL, try the original URL
-            const downloadUrl = await this.getKwikDownloadUrl(url);
-            return { downloadUrl, type: 'direct_download' };
+            const { downloadUrl, filename: directFilename } = await this.getKwikDownloadUrl(url);
+            return { downloadUrl, filename: directFilename, type: 'direct_download' };
         }
         
         console.log('Found Kwik URL:', resolvedUrl);
+        if (filename) console.log('Extracted Certain Filename:', filename);
         
         // Use the extracted URL for getting the download link
-        const downloadUrl = await this.getKwikDownloadUrl(resolvedUrl);
-        return { downloadUrl, type: 'redirected_download', originalUrl: url, resolvedUrl };
+        const { downloadUrl, filename: kwikFilename } = await this.getKwikDownloadUrl(resolvedUrl);
+        return { 
+            downloadUrl, 
+            filename: filename || kwikFilename, 
+            type: 'redirected_download', 
+            originalUrl: url, 
+            resolvedUrl 
+        };
     }
 
     async extractKwikUrl(url) {
@@ -345,12 +352,24 @@ class Animepahe {
             console.log("Page fetched for extraction, status:", response.statusCode);
             
             const body = response.body;
+
+            let filename = null;
+            // The title may or may not contain ":: Kwik"
+            const titleMatch = body.match(/<title>([^<]+)<\/title>/i);
+            if (titleMatch && titleMatch[1]) {
+                filename = titleMatch[1].replace(/\s*::\s*Kwik.*$/i, '').trim();
+            } else {
+                const h2Match = body.match(/<h2>\s*([^<]+)\s*<\/h2>/i);
+                if (h2Match && h2Match[1]) {
+                    filename = h2Match[1].replace(/\s*::\s*Kwik.*$/i, '').trim();
+                }
+            }
             
             const redirectPattern = /href\s*:\s*["']([^"']+)["']/i;
             const redirectMatch = body.match(redirectPattern);
             if (redirectMatch && redirectMatch[1] && redirectMatch[1].includes(Config.iframeBaseUrl)) {
                 console.log('Found redirect URL:', redirectMatch[1]);
-                return redirectMatch[1];
+                return { kwikUrl: redirectMatch[1], filename };
             }
             
             // Dynamic regex for script pattern
@@ -367,7 +386,7 @@ class Animepahe {
                     kwikUrl = `https://${Config.iframeBaseUrl}${kwikUrl}`;
                 }
                 console.log('Found Kwik URL from script:', kwikUrl);
-                return kwikUrl;
+                return { kwikUrl, filename };
             }
             
             // Pattern 3: Look for kwik.cx URLs in href attributes
@@ -382,7 +401,7 @@ class Animepahe {
                     kwikUrl = urlObj.protocol + '//' + urlObj.host + kwikUrl;
                 }
                 console.log('Found Kwik URL from href:', kwikUrl);
-                return kwikUrl;
+                return { kwikUrl, filename };
             }
             
             // Pattern 4: Look for kwik.cx URLs in JavaScript redirects
@@ -390,7 +409,7 @@ class Animepahe {
             const jsMatch = body.match(jsRedirectPattern);
             if (jsMatch && jsMatch[1]) {
                 console.log('Found Kwik URL from JavaScript:', jsMatch[1]);
-                return jsMatch[1];
+                return { kwikUrl: jsMatch[1], filename };
             }
             
             // Pattern 5: Look for the specific script pattern you mentioned
@@ -398,15 +417,15 @@ class Animepahe {
             const specificMatch = body.match(specificPattern);
             if (specificMatch && specificMatch[1]) {
                 console.log('Found Kwik URL from specific pattern:', specificMatch[1]);
-                return specificMatch[1];
+                return { kwikUrl: specificMatch[1], filename };
             }
             
             console.log('No Kwik URL found in the HTML content');
-            return null;
+            return { kwikUrl: null, filename };
             
         } catch (error) {
             console.error('Error extracting Kwik URL:', error.message);
-            return null;
+            return { kwikUrl: null, filename: null };
         }
     }
 
@@ -514,6 +533,13 @@ class Animepahe {
     
         console.log("[Step 3] Extracted action:", foundAction);
         console.log("[Step 3] Extracted token:", foundToken);
+
+        // Extract filename from the kwik page itself as fallback/verification
+        let filename = null;
+        const titleMatch = body.match(/<title>([^<]+)<\/title>/i);
+        if (titleMatch && titleMatch[1]) {
+            filename = titleMatch[1].replace(/\s*::\s*Kwik.*$/i, '').trim();
+        }
     
         // Wait a bit to simulate human behavior
         console.log("[Step 4] Waiting 2 seconds...");
@@ -548,7 +574,7 @@ class Animepahe {
             if (postResponse.statusCode === 302 || postResponse.statusCode === 301) {
                 const downloadUrl = postResponse.location || postResponse.headers.location;
                 console.log("Final download URL:", downloadUrl);
-                return downloadUrl;
+                return { downloadUrl, filename };
             } 
             
             if (postResponse.statusCode === 200) {
@@ -557,13 +583,13 @@ class Animepahe {
                 const metaMatch = body.match(/<meta[^>]*http-equiv=["']refresh["'][^>]*content=["'][^"]*url=([^"']+)["']/i);
                 if (metaMatch) {
                     console.log("Found meta refresh URL:", metaMatch[1]);
-                    return metaMatch[1];
+                    return { downloadUrl: metaMatch[1], filename };
                 }
                 
                 const jsMatch = body.match(/window\.location(?:\.href)?\s*=\s*["']([^"']+)["']/i);
                 if (jsMatch) {
                     console.log("Found JavaScript redirect URL:", jsMatch[1]);
-                    return jsMatch[1];
+                    return { downloadUrl: jsMatch[1], filename };
                 }
 
                 console.log("[Response body snippet]:", body.substring(0, 800));
@@ -576,7 +602,7 @@ class Animepahe {
                 const downloadUrl = error.response?.headers?.location;
                 if (downloadUrl) {
                     console.log("Final download URL (from error):", downloadUrl);
-                    return downloadUrl;
+                    return { downloadUrl, filename };
                 }
             }
             throw error;
