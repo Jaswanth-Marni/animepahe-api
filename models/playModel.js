@@ -356,9 +356,9 @@ class PlayModel {
             const fastDownloadMap = new Map();
             
             const processedSources = allSources.flat().map(source => {
-                // Return the download page URL (/f/) which is required as a referer for downloading the MP4
+                let downloadPage = null;
                 if (source.embed && source.embed.includes('/e/')) {
-                    source.downloadPage = source.embed.replace('/e/', '/f/');
+                    downloadPage = source.embed.replace('/e/', '/f/');
                 }
 
                 if (includeDownloads && source.url && source.isM3U8) {
@@ -377,10 +377,12 @@ class PlayModel {
                     );
                     
                     if (downloadUrl) {
-                        source.download = downloadUrl;
-                        // Key format: "720-SubsPlease-false-true" (res-fansub-isDub-isBD)
                         const key = `${source.resolution}-${source.fanSub || 'default'}-${source.isDub}-${source.isBD}`;
-                        fastDownloadMap.set(key, downloadUrl);
+                        fastDownloadMap.set(key, { 
+                            download: downloadUrl, 
+                            downloadPage: downloadPage,
+                            filename: source.filename
+                        });
                     }
                 }
                 return source;
@@ -389,13 +391,14 @@ class PlayModel {
             playInfo.sources = processedSources;
             
             if (includeDownloads) {
-                // Hydrate the metadata list with our fast links
                 const hydratedDownloads = metadataList.map(item => {
                     const key = `${item.resolution}-${item.fansub || 'default'}-${item.isDub}-${item.isBD}`;
-                    const fastDownload = fastDownloadMap.get(key);
+                    const cached = fastDownloadMap.get(key);
                     
-                    if (fastDownload) {
-                        item.download = fastDownload;
+                    if (cached) {
+                        item.download = cached.download;
+                        item.downloadPage = cached.downloadPage;
+                        if (cached.filename) item.filename = cached.filename;
                     }
                     return item;
                 });
