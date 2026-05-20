@@ -1,6 +1,8 @@
 const { launchBrowser } = require('./browser');
 const cloudscraper = require('cloudscraper');
 const axios = require('axios');
+const { HttpProxyAgent } = require('http-proxy-agent');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 const Config = require('./config');
 const { CustomError } = require('../middleware/errorHandler');
 
@@ -160,7 +162,6 @@ class RequestManager {
     static async scrapeWithPlaywright(url) {
         console.log('Fetching content from:', url);
         const proxy = Config.proxyEnabled ? Config.getRandomProxy() : null;
-        console.log(`Using proxy: ${proxy || 'none'}`);
 
         const browser = await launchBrowser();
 
@@ -267,7 +268,6 @@ class RequestManager {
         console.log('Fetching Cloudflare-protected content from:', url);
         
         const proxy = Config.proxyEnabled ? Config.getRandomProxy() : null;
-        console.log(`Using proxy: ${proxy || 'none'}`);
 
         const browser = await launchBrowser();
 
@@ -405,11 +405,14 @@ class RequestManager {
             }
             
             const proxyUrl = Config.proxyEnabled ? Config.getRandomProxy() : null;
-            const [proxyHost, proxyPort] = proxyUrl ? proxyUrl.split(':') : [null, null];
 
-            console.log(`Using proxy: ${proxyUrl || 'none'}`);
-            if (proxyHost && !proxyPort) {
-                throw new CustomError('Invalid proxy format. Expected format: host:port', 400);
+            // Build proxy agents for proper authenticated proxy support
+            let httpAgent = undefined;
+            let httpsAgent = undefined;
+            if (proxyUrl) {
+                const formattedProxyUrl = proxyUrl.startsWith('http') ? proxyUrl : 'http://' + proxyUrl;
+                httpAgent = new HttpProxyAgent(formattedProxyUrl);
+                httpsAgent = new HttpsProxyAgent(formattedProxyUrl);
             }
 
             const response = await axios.get(url, {
@@ -419,7 +422,6 @@ class RequestManager {
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Referer': Config.getUrl('home'),
                     'User-Agent': Config.userAgent,
-                    'Accept-Language': 'en-US,en;q=0.9', 
                     'Sec-Fetch-*': '?', 
                     "dnt": "1",
                     "sec-ch-ua": '"Not A(Brand";v="99", "Microsoft Edge";v="121", "Chromium";v="121"',
@@ -431,11 +433,9 @@ class RequestManager {
                     "x-requested-with": "XMLHttpRequest",
                     'Cookie': cookieHeader
                 },
-                proxy: proxyUrl ? {
-                    host: proxyHost,
-                    port: parseInt(proxyPort),
-                    protocol: 'http'
-                } : false
+                proxy: false,
+                ...(httpAgent ? { httpAgent } : {}),
+                ...(httpsAgent ? { httpsAgent } : {})
             });
 
             const responseText = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
@@ -448,8 +448,7 @@ class RequestManager {
 
             return response.data;
         } catch (error) {
-            if (error.response?.status === 403) {
-                console.log(Config.cookies);
+            if (error.response?.status === 403 || error.response?.status === 502 || error.response?.status === 503) {
                 throw new CustomError('DDoS-Guard authentication required, invalid cookies', 403);
             }
             if (error.response?.status === 404) {
