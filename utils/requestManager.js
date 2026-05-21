@@ -7,6 +7,51 @@ const Config = require('./config');
 const { CustomError } = require('../middleware/errorHandler');
 
 class RequestManager {
+    static getPlaywrightProxyOptions(proxyString) {
+        if (!proxyString) return null;
+        try {
+            const formatted = (proxyString.startsWith('http://') || proxyString.startsWith('https://') || proxyString.startsWith('socks5://'))
+                ? proxyString 
+                : 'http://' + proxyString;
+            const parsedUrl = new URL(formatted);
+            const proxyOptions = {
+                server: `${parsedUrl.protocol}//${parsedUrl.host}`
+            };
+            if (parsedUrl.username) {
+                proxyOptions.username = decodeURIComponent(parsedUrl.username);
+            }
+            if (parsedUrl.password) {
+                proxyOptions.password = decodeURIComponent(parsedUrl.password);
+            }
+            return proxyOptions;
+        } catch (e) {
+            console.error('Error parsing proxy for Playwright:', e.message);
+            return { server: proxyString };
+        }
+    }
+
+    static maskProxyUrl(proxyUrl) {
+        if (!proxyUrl) return 'null';
+        try {
+            const formatted = (proxyUrl.startsWith('http://') || proxyUrl.startsWith('https://') || proxyUrl.startsWith('socks5://'))
+                ? proxyUrl 
+                : 'http://' + proxyUrl;
+            const parsed = new URL(formatted);
+            let maskedUser = '';
+            let maskedPass = '';
+            if (parsed.username) {
+                maskedUser = parsed.username.substring(0, Math.min(2, parsed.username.length)) + '*'.repeat(Math.max(0, parsed.username.length - 2));
+            }
+            if (parsed.password) {
+                maskedPass = parsed.password.substring(0, Math.min(2, parsed.password.length)) + '*'.repeat(Math.max(0, parsed.password.length - 2));
+            }
+            const auth = parsed.username ? `${maskedUser}:${maskedPass}@` : '';
+            return `${parsed.protocol}//${auth}${parsed.host} (length: ${proxyUrl.length}, raw length: ${proxyUrl.trim().length})`;
+        } catch (e) {
+            return `[Invalid/Unparseable Proxy URL] (length: ${proxyUrl.length})`;
+        }
+    }
+
     /**
      * Universal cloudscraper method - handles GET, POST, and any HTTP method
      * @param {Object} options - Request options
@@ -169,7 +214,10 @@ class RequestManager {
             const contextOptions = {};
 
             if (proxy) {
-                contextOptions.proxy = { server: proxy };
+                const pwProxy = this.getPlaywrightProxyOptions(proxy);
+                if (pwProxy) {
+                    contextOptions.proxy = pwProxy;
+                }
             }
 
             const context = await browser.newContext(contextOptions);
@@ -291,7 +339,10 @@ class RequestManager {
             };
 
             if (proxy) {
-                contextOptions.proxy = { server: proxy };
+                const pwProxy = this.getPlaywrightProxyOptions(proxy);
+                if (pwProxy) {
+                    contextOptions.proxy = pwProxy;
+                }
             }
 
             const context = await browser.newContext(contextOptions);
@@ -448,6 +499,12 @@ class RequestManager {
 
             return response.data;
         } catch (error) {
+            if (error.response?.status === 407) {
+                const proxyUrl = Config.proxyEnabled ? Config.getRandomProxy() : null;
+                console.error(`[Proxy 407] Proxy authentication failed. Proxy: ${this.maskProxyUrl(proxyUrl)}`);
+                console.error(`[Proxy 407] USE_PROXY=${process.env.USE_PROXY}, PROXIES env length=${(process.env.PROXIES || '').length}`);
+                throw new CustomError('Proxy authentication failed (407). Check proxy credentials in environment.', 407);
+            }
             if (error.response?.status === 403 || error.response?.status === 502 || error.response?.status === 503) {
                 throw new CustomError('DDoS-Guard authentication required, invalid cookies', 403);
             }

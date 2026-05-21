@@ -61,7 +61,20 @@ class Animepahe {
                 this.activeBrowser = browser; // Store the browser instance
             }
 
-            const context = await browser.newContext();
+            const context = await browser.newContext((() => {
+                const opts = {};
+                if (Config.proxyEnabled) {
+                    const proxyStr = Config.getRandomProxy();
+                    if (proxyStr) {
+                        const pwProxy = RequestManager.getPlaywrightProxyOptions(proxyStr);
+                        if (pwProxy) {
+                            opts.proxy = pwProxy;
+                            console.log('[refreshCookies] Using proxy for cookie refresh');
+                        }
+                    }
+                }
+                return opts;
+            })());
             const page = await context.newPage();
 
             // Add stealth plugin
