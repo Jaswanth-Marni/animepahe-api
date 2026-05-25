@@ -1,8 +1,6 @@
 const { launchBrowser } = require('./browser');
 const cloudscraper = require('cloudscraper');
 const axios = require('axios');
-const { HttpProxyAgent } = require('http-proxy-agent');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 const Config = require('./config');
 const { CustomError } = require('../middleware/errorHandler');
 
@@ -202,6 +200,80 @@ class RequestManager {
         });
 
         return response.body;
+    }
+
+    /**
+     * Scrape using got-scraping to bypass Cloudflare
+     */
+    static async scrapeWithGotScraping(url, options = {}) {
+        console.log(`Fetching HTML with GotScraping from ${url}...`);
+        
+        const { gotScraping } = await import('got-scraping');
+        
+        try {
+            const response = await gotScraping({
+                url: url,
+                headers: {
+                    'Referer': options.referer || Config.baseUrl,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Connection': 'keep-alive',
+                    ...options.headers
+                },
+                headerGeneratorOptions: {
+                    browsers: [{name: 'chrome', minVersion: 110}],
+                    devices: ['desktop'],
+                    locales: ['en-US', 'en'],
+                    operatingSystems: ['windows']
+                },
+                throwHttpErrors: false,
+                timeout: { request: options.timeout || 30000 }
+            });
+            return response.body;
+        } catch (error) {
+            console.error(`[GotScraping Error] GET ${url}:`, error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Scrape a page using the serverless-compatible Playwright browser as a fallback.
+     * Uses the same launchBrowser() from browser.js which automatically picks
+     * @sparticuz/chromium on Linux/serverless and regular Playwright locally.
+     */
+    static async scrapeWithPlaywrightPage(url, options = {}) {
+        console.log(`Fetching HTML with Playwright from ${url}...`);
+        
+        const browser = await launchBrowser();
+        try {
+            const context = await browser.newContext({
+                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                extraHTTPHeaders: {
+                    'Referer': options.referer || Config.baseUrl,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Upgrade-Insecure-Requests': '1',
+                }
+            });
+
+            await context.addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            });
+
+            const page = await context.newPage();
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: options.timeout || 60000 });
+
+            // Wait a moment for any JS-driven Cloudflare challenges to resolve
+            await page.waitForTimeout(3000);
+
+            const content = await page.content();
+            await context.close();
+            return content;
+        } finally {
+            await browser.close();
+        }
     }
 
     static async scrapeWithPlaywright(url) {
@@ -461,6 +533,8 @@ class RequestManager {
             let httpAgent = undefined;
             let httpsAgent = undefined;
             if (proxyUrl) {
+                const { HttpProxyAgent } = await import('http-proxy-agent');
+                const { HttpsProxyAgent } = await import('https-proxy-agent');
                 const formattedProxyUrl = proxyUrl.startsWith('http') ? proxyUrl : 'http://' + proxyUrl;
                 httpAgent = new HttpProxyAgent(formattedProxyUrl);
                 httpsAgent = new HttpsProxyAgent(formattedProxyUrl);

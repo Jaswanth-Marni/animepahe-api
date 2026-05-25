@@ -6,8 +6,6 @@ const vm = require('vm')
 const RequestManager = require("../utils/requestManager");
 const { launchBrowser } = require('../utils/browser');
 const { CustomError } = require('../middleware/errorHandler');
-const os = require('os');
-const { config } = require('dotenv');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -262,42 +260,31 @@ class Animepahe {
         // To add more strategies in the future, add them to this array:
         const allStrategies = [
             () => this.scrapeIframeLight(url),
-            // () => this.scrapeIframeHeavy(Config.getUrl('play', id, episodeId), url),
+            () => this.scrapeIframePlaywright(url),
         ];
 
-        // Process strategies in parallel, max 2 at a time
-        const maxParallel = 2;
-        
-        for (let i = 0; i < allStrategies.length; i += maxParallel) {
-            const batch = allStrategies.slice(i, i + maxParallel);
-            console.log(`Trying ${batch.length} strategies in parallel (batch ${Math.floor(i / maxParallel) + 1}/${Math.ceil(allStrategies.length / maxParallel)})...`);
-            
-            const promises = batch.map(async (strategy, idx) => {
-                try {
-                    console.log(`Starting strategy ${i + idx + 1} in parallel...`);
-                    const result = await strategy();
-                    if (result && result.length > 100) {
-                        console.log(`Strategy ${i + idx + 1} succeeded`);
-                        return { success: true, result, strategyIndex: i + idx };
-                    }
-                    return { success: false, error: 'Result too short', strategyIndex: i + idx };
-                } catch (error) {
-                    console.warn(`Strategy ${i + idx + 1} failed:`, error.message);
-                    return { success: false, error: error.message, strategyIndex: i + idx };
-                }
-            });
+        const errors = [];
 
-            const results = await Promise.all(promises);
-            
-            // Check if any strategy in the batch succeeded
-            const successfulResult = results.find(r => r.success);
-            if (successfulResult) {
-                return successfulResult.result;
+        for (let i = 0; i < allStrategies.length; i++) {
+            const strategy = allStrategies[i];
+            try {
+                console.log(`Trying strategy ${i + 1}/${allStrategies.length}...`);
+                const result = await strategy();
+                
+                if (result && result.length > 100) {
+                    console.log(`Strategy ${i + 1} succeeded`);
+                    return result;
+                }
+                
+                throw new Error('Result too short or invalid');
+            } catch (error) {
+                console.warn(`Strategy ${i + 1} failed:`, error.message);
+                errors.push(`Strategy ${i + 1}: ${error.message}`);
             }
         }
 
         // If all strategies failed, throw error with all failure details
-        throw new CustomError('All iframe fetching strategies failed', 503);
+        throw new CustomError(`All iframe fetching strategies failed: ${errors.join(', ')}`, 503);
     }
 
     async scrapeIframe(id, episodeId, url) {
@@ -591,8 +578,6 @@ class Animepahe {
                     console.log("Found JavaScript redirect URL:", jsMatch[1]);
                     return { downloadUrl: jsMatch[1], filename };
                 }
-
-                console.log("[Response body snippet]:", body.substring(0, 800));
             }
         } catch (error) {
             console.log("[Request Error]:", error.message);
@@ -647,8 +632,14 @@ class Animepahe {
  
     async scrapeIframeLight(url) {
         try {
-            const html = await RequestManager.scrapeWithCloudScraper(url);
+            const html = await RequestManager.scrapeWithGotScraping(url, {
+                referer: Config.getUrl("home")
+            });
             
+            if (html && html.toLowerCase().includes('attention required!')) {
+                throw new Error('Response blocked or invalid');
+            }
+
             if (html && html.length > 100 && 
                 !html.toLowerCase().includes('just a moment') &&
                 !html.toLowerCase().includes('checking your browser')) {
@@ -657,7 +648,30 @@ class Animepahe {
             
             throw new Error('Response blocked or invalid');
         } catch (error) {
-            console.warn('Cloudscraper method failed:', error.message);
+            console.warn('[scrapeIframeLight] GotScraping failed:', error.message);
+            throw error;
+        }
+    }
+
+    async scrapeIframePlaywright(url) {
+        try {
+            const html = await RequestManager.scrapeWithPlaywrightPage(url, {
+                referer: Config.getUrl("home")
+            });
+
+            if (html && html.toLowerCase().includes('attention required!')) {
+                throw new Error('Response blocked or invalid');
+            }
+
+            if (html && html.length > 100 &&
+                !html.toLowerCase().includes('just a moment') &&
+                !html.toLowerCase().includes('checking your browser')) {
+                return html;
+            }
+
+            throw new Error('Response blocked or invalid');
+        } catch (error) {
+            console.warn('[scrapeIframePlaywright] Playwright failed:', error.message);
             throw error;
         }
     }
