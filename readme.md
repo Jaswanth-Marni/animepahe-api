@@ -198,7 +198,8 @@ The API returns errors in this format:
 - @sparticuz/chromium
 - Cheerio
 - Axios
-- cloudscraper
+- got-scraping
+- cloudscraper (changed to above library)
 - jsdom
 - vm
 
