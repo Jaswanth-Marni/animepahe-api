@@ -19,6 +19,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
+    "got-scraping": "^4.2.1",
     "http-proxy-agent": "^9.0.0",
     "https-proxy-agent": "^9.0.0",
     "jsdom": "^22.1.0",
