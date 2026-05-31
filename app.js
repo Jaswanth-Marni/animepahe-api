@@ -98,17 +98,50 @@ app.get('/api/proxy/m3u8', async (req, res) => {
             let body = response.data.toString('utf-8');
             const hostUrl = `https://${req.headers.host}`;
 
-            // Rewrite absolute URLs in the playlist
-            body = body.replace(/^(https?:\/\/[^\s]+)/gm, (match) => {
-                return `${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(match)}`;
-            });
-            // Rewrite KEY URIs
-            body = body.replace(/URI="(https?:\/\/[^"]+)"/g, (match, url) => {
-                return `URI="${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(url)}"`;
-            });
+            // 1. Extract the AES key URI if it exists
+            let keyUri = '';
+            const keyMatch = body.match(/#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"/);
+            if (keyMatch) {
+                // Rewrite the key URI to use our proxy
+                keyUri = `${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(keyMatch[1])}`;
+            }
+
+            let newBody = '';
+            const lines = body.split('\n');
+            
+            for (let line of lines) {
+                line = line.trim();
+                if (!line) continue;
+                
+                let rewrittenLine = line;
+                // Rewrite absolute URLs to use our proxy
+                if (line.startsWith('http://') || line.startsWith('https://')) {
+                    rewrittenLine = `${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(line)}`;
+                }
+
+                // FIX FOR KWIK HLS FRAGMENT DROPS:
+                // Kwik drops segments but doesn't update the Media Sequence or insert Discontinuities.
+                // This breaks hls.js AES-128 decryption because the IV goes out of sync!
+                // We fix this by explicitly defining the IV for EVERY segment based on its filename number.
+                if (line.includes('segment-') && line.endsWith('.jpg')) {
+                    const segMatch = line.match(/segment-(\d+)/);
+                    if (segMatch && keyUri) {
+                        const segNum = parseInt(segMatch[1], 10);
+                        const ivHex = segNum.toString(16).padStart(32, '0');
+                        newBody += `#EXT-X-KEY:METHOD=AES-128,URI="${keyUri}",IV=0x${ivHex}\n`;
+                    }
+                }
+
+                // Skip the global EXT-X-KEY since we inject it before every segment now
+                if (line.startsWith('#EXT-X-KEY') && keyUri) {
+                    continue;
+                }
+
+                newBody += rewrittenLine + '\n';
+            }
 
             res.set('Content-Type', 'application/vnd.apple.mpegurl');
-            res.send(body);
+            res.send(newBody);
         } else {
             res.send(Buffer.from(response.data));
         }
