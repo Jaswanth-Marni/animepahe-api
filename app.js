@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const axios = require('axios');
 const Config = require('./utils/config');
 const { errorHandler, CustomError } = require('./middleware/errorHandler');
 const rateLimiter = require('./middleware/rateLimiter');
@@ -66,6 +67,56 @@ app.use('/api', cache(30), queueRoutes); // 30 seconds
 app.use('/api', cache(18000), animeListRoutes); // 1 hour
 app.use('/api', cache(86400), animeInfoRoutes); // 1 day
 app.use('/api', cache(3600), playRoutes);  // 5 hours
+
+// =============================================
+// M3U8 Stream Proxy - Bypasses CDN Referer check
+// =============================================
+app.get('/api/proxy/m3u8', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) {
+        return res.status(400).json({ error: 'Missing url parameter' });
+    }
+
+    try {
+        const response = await axios.get(targetUrl, {
+            headers: {
+                'Referer': 'https://kwik.cx/',
+                'Origin': 'https://kwik.cx',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            responseType: 'arraybuffer',
+            timeout: 15000
+        });
+
+        const contentType = response.headers['content-type'] || 'application/octet-stream';
+        res.set('Content-Type', contentType);
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Headers', '*');
+
+        // If it's an m3u8 playlist, rewrite internal URLs to also go through the proxy
+        if (contentType.includes('mpegurl') || targetUrl.endsWith('.m3u8')) {
+            let body = response.data.toString('utf-8');
+            const hostUrl = `${req.protocol}://${req.headers.host}`;
+
+            // Rewrite absolute URLs in the playlist
+            body = body.replace(/^(https?:\/\/[^\s]+)/gm, (match) => {
+                return `${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(match)}`;
+            });
+            // Rewrite KEY URIs
+            body = body.replace(/URI="(https?:\/\/[^"]+)"/g, (match, url) => {
+                return `URI="${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(url)}"`;
+            });
+
+            res.set('Content-Type', 'application/vnd.apple.mpegurl');
+            res.send(body);
+        } else {
+            res.send(Buffer.from(response.data));
+        }
+    } catch (error) {
+        console.error('Proxy error:', error.message);
+        res.status(502).json({ error: 'Failed to proxy stream', message: error.message });
+    }
+});
 
 app.use((req, res, next) => {
     if (!req.route) {
