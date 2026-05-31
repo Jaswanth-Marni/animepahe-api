@@ -52,14 +52,112 @@ app.use(cors(corsOptions));
 
 // Middleware to set hostUrl ONCE based on first incoming request
 app.use((req, res, next) => {
-    const protocol = req.protocol;
-    const host = req.headers.host;
-    Config.setHostUrl(protocol, host);
+    // Force HTTPS for the proxy URLs (since Render handles SSL termination)
+    const hostUrl = `https://${req.headers.host}`;
+    Config.setHostUrl('https', req.headers.host);
     next();
 });
 
-// Apply rate limiting only if RATE_LIMIT_SECRET is set (only affects your deployment)
+// Apply rate limiting
 app.use(rateLimiter);
+
+// ---> PROXY ROUTE WITH DISCONTINUITY AND IV FIX <---
+app.get('/api/proxy/m3u8', async (req, res) => {
+    try {
+        const targetUrl = req.query.url;
+        if (!targetUrl) return res.status(400).send('URL required');
+
+        const response = await axios.get(targetUrl, {
+            headers: {
+                'Referer': 'https://kwik.cx/',
+                'Origin': 'https://kwik.cx',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            },
+            responseType: 'arraybuffer',
+            timeout: 15000
+        });
+
+        if (targetUrl.includes('.key')) {
+            res.set({
+                'Content-Type': 'application/octet-stream',
+                'Access-Control-Allow-Origin': '*'
+            });
+            return res.send(response.data);
+        } else if (targetUrl.includes('.jpg')) {
+            res.set({
+                'Content-Type': 'video/mp2t',
+                'Access-Control-Allow-Origin': '*'
+            });
+            return res.send(response.data);
+        } else if (targetUrl.includes('.m3u8')) {
+            let m3u8Content = Buffer.from(response.data).toString('utf-8');
+            const lines = m3u8Content.split('\n');
+            const modifiedLines = [];
+            
+            // Extract the base URL to construct absolute URLs for the key and segments
+            const baseUrlMatch = targetUrl.match(/(https?:\/\/[^\/]+\/stream\/[^\/]+\/[^\/]+\/[^\/]+\/)/);
+            const baseUrl = baseUrlMatch ? baseUrlMatch[1] : '';
+
+            let lastSegmentIndex = 0; // Track segment numbers to detect jumps
+            const hostUrl = Config.getHostUrl();
+
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i].trim();
+                if (!line) continue;
+
+                if (line.startsWith('#EXT-X-KEY')) {
+                    // Skip existing keys, we inject them manually before EXTINF
+                    continue;
+                } else if (line.startsWith('#EXTINF:')) {
+                    // Look ahead for the segment file
+                    let segmentFile = '';
+                    for (let j = i + 1; j < lines.length; j++) {
+                        let peek = lines[j].trim();
+                        if (peek && !peek.startsWith('#')) {
+                            segmentFile = peek;
+                            break;
+                        }
+                    }
+
+                    if (segmentFile) {
+                        const match = segmentFile.match(/segment-(\d+)-/);
+                        if (match) {
+                            const currentSegmentIndex = parseInt(match[1], 10);
+                            
+                            // CRITICAL FIX: If segments are skipped (e.g. 1 -> 4), inject a discontinuity
+                            if (lastSegmentIndex !== 0 && currentSegmentIndex > lastSegmentIndex + 1) {
+                                modifiedLines.push('#EXT-X-DISCONTINUITY');
+                            }
+                            lastSegmentIndex = currentSegmentIndex;
+
+                            // Inject the decryption key perfectly paired to this segment
+                            let hexIv = currentSegmentIndex.toString(16).padStart(32, '0');
+                            const keyUrl = `${baseUrl}mon.key`;
+                            const proxyKeyUrl = `${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(keyUrl)}`;
+                            modifiedLines.push(`#EXT-X-KEY:METHOD=AES-128,URI="${proxyKeyUrl}",IV=0x${hexIv}`);
+                        }
+                    }
+                    modifiedLines.push(line);
+                } else if (!line.startsWith('#')) {
+                    // It's a segment URL
+                    const segUrl = baseUrl + line;
+                    modifiedLines.push(`${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(segUrl)}`);
+                } else {
+                    modifiedLines.push(line);
+                }
+            }
+
+            res.set({
+                'Content-Type': 'application/vnd.apple.mpegurl',
+                'Access-Control-Allow-Origin': '*'
+            });
+            res.send(modifiedLines.join('\n'));
+        }
+    } catch (error) {
+        console.error('Proxy error:', error.message);
+        res.status(502).json({ error: 'Failed to proxy stream', message: error.message });
+    }
+});
 
 app.use('/api', testRoutes);
 app.use('/api', homeRoutes); // caching done in homeRoutes
@@ -67,101 +165,6 @@ app.use('/api', cache(30), queueRoutes); // 30 seconds
 app.use('/api', cache(18000), animeListRoutes); // 1 hour
 app.use('/api', cache(86400), animeInfoRoutes); // 1 day
 app.use('/api', cache(3600), playRoutes);  // 5 hours
-
-// =============================================
-// M3U8 Stream Proxy - Bypasses CDN Referer check
-// =============================================
-app.get('/api/proxy/m3u8', async (req, res) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) {
-        return res.status(400).json({ error: 'Missing url parameter' });
-    }
-
-    try {
-        const response = await axios.get(targetUrl, {
-            headers: {
-                'Referer': 'https://kwik.cx/',
-                'Origin': 'https://kwik.cx',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            responseType: 'arraybuffer',
-            timeout: 15000
-        });
-
-        const contentType = response.headers['content-type'] || 'application/octet-stream';
-        res.set('Content-Type', contentType);
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Headers', '*');
-
-        // If it's an m3u8 playlist, rewrite internal URLs to also go through the proxy
-        if (contentType.includes('mpegurl') || targetUrl.endsWith('.m3u8')) {
-            let body = response.data.toString('utf-8');
-            const hostUrl = `https://${req.headers.host}`;
-
-            // Extract the AES key URI if it exists
-            let keyUri = '';
-            const keyMatch = body.match(/#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"/);
-            if (keyMatch) {
-                keyUri = `${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(keyMatch[1])}`;
-            }
-
-            let newBody = '';
-            const lines = body.split('\n');
-            
-            for (let i = 0; i < lines.length; i++) {
-                let line = lines[i].trim();
-                if (!line) continue;
-                
-                // Skip the global EXT-X-KEY since we inject it before every segment now
-                if (line.startsWith('#EXT-X-KEY') && keyUri) {
-                    continue;
-                }
-                
-                let rewrittenLine = line;
-                // Rewrite absolute URLs to use our proxy
-                if (line.startsWith('http://') || line.startsWith('https://')) {
-                    rewrittenLine = `${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(line)}`;
-                }
-
-                // FIX FOR KWIK HLS FRAGMENT DROPS:
-                // Kwik drops segments but doesn't update the Media Sequence or insert Discontinuities.
-                // We fix the AES decryption by explicitly defining the IV for EVERY segment based on its filename number.
-                // The HLS specification STRICTLY requires EXT-X-KEY to be placed BEFORE EXTINF!
-                if (line.startsWith('#EXTINF:')) {
-                    // Look ahead to the next line to find the segment URL
-                    let nextLine = '';
-                    for (let j = i + 1; j < lines.length; j++) {
-                        let peekLine = lines[j].trim();
-                        if (!peekLine) continue;
-                        if (peekLine.startsWith('#')) continue;
-                        nextLine = peekLine;
-                        break;
-                    }
-                    
-                    if (nextLine.includes('segment-') && nextLine.endsWith('.jpg')) {
-                        const segMatch = nextLine.match(/segment-(\d+)/);
-                        if (segMatch && keyUri) {
-                            const segNum = parseInt(segMatch[1], 10);
-                            const ivHex = segNum.toString(16).padStart(32, '0');
-                            // Inject BEFORE the EXTINF tag
-                            newBody += `#EXT-X-KEY:METHOD=AES-128,URI="${keyUri}",IV=0x${ivHex}\n`;
-                        }
-                    }
-                }
-
-                newBody += rewrittenLine + '\n';
-            }
-
-            res.set('Content-Type', 'application/vnd.apple.mpegurl');
-            res.send(newBody);
-        } else {
-            res.send(Buffer.from(response.data));
-        }
-    } catch (error) {
-        console.error('Proxy error:', error.message);
-        res.status(502).json({ error: 'Failed to proxy stream', message: error.message });
-    }
-});
 
 app.use((req, res, next) => {
     if (!req.route) {
