@@ -98,20 +98,24 @@ app.get('/api/proxy/m3u8', async (req, res) => {
             let body = response.data.toString('utf-8');
             const hostUrl = `https://${req.headers.host}`;
 
-            // 1. Extract the AES key URI if it exists
+            // Extract the AES key URI if it exists
             let keyUri = '';
             const keyMatch = body.match(/#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"/);
             if (keyMatch) {
-                // Rewrite the key URI to use our proxy
                 keyUri = `${hostUrl}/api/proxy/m3u8?url=${encodeURIComponent(keyMatch[1])}`;
             }
 
             let newBody = '';
             const lines = body.split('\n');
             
-            for (let line of lines) {
-                line = line.trim();
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i].trim();
                 if (!line) continue;
+                
+                // Skip the global EXT-X-KEY since we inject it before every segment now
+                if (line.startsWith('#EXT-X-KEY') && keyUri) {
+                    continue;
+                }
                 
                 let rewrittenLine = line;
                 // Rewrite absolute URLs to use our proxy
@@ -121,20 +125,28 @@ app.get('/api/proxy/m3u8', async (req, res) => {
 
                 // FIX FOR KWIK HLS FRAGMENT DROPS:
                 // Kwik drops segments but doesn't update the Media Sequence or insert Discontinuities.
-                // This breaks hls.js AES-128 decryption because the IV goes out of sync!
-                // We fix this by explicitly defining the IV for EVERY segment based on its filename number.
-                if (line.includes('segment-') && line.endsWith('.jpg')) {
-                    const segMatch = line.match(/segment-(\d+)/);
-                    if (segMatch && keyUri) {
-                        const segNum = parseInt(segMatch[1], 10);
-                        const ivHex = segNum.toString(16).padStart(32, '0');
-                        newBody += `#EXT-X-KEY:METHOD=AES-128,URI="${keyUri}",IV=0x${ivHex}\n`;
+                // We fix the AES decryption by explicitly defining the IV for EVERY segment based on its filename number.
+                // The HLS specification STRICTLY requires EXT-X-KEY to be placed BEFORE EXTINF!
+                if (line.startsWith('#EXTINF:')) {
+                    // Look ahead to the next line to find the segment URL
+                    let nextLine = '';
+                    for (let j = i + 1; j < lines.length; j++) {
+                        let peekLine = lines[j].trim();
+                        if (!peekLine) continue;
+                        if (peekLine.startsWith('#')) continue;
+                        nextLine = peekLine;
+                        break;
                     }
-                }
-
-                // Skip the global EXT-X-KEY since we inject it before every segment now
-                if (line.startsWith('#EXT-X-KEY') && keyUri) {
-                    continue;
+                    
+                    if (nextLine.includes('segment-') && nextLine.endsWith('.jpg')) {
+                        const segMatch = nextLine.match(/segment-(\d+)/);
+                        if (segMatch && keyUri) {
+                            const segNum = parseInt(segMatch[1], 10);
+                            const ivHex = segNum.toString(16).padStart(32, '0');
+                            // Inject BEFORE the EXTINF tag
+                            newBody += `#EXT-X-KEY:METHOD=AES-128,URI="${keyUri}",IV=0x${ivHex}\n`;
+                        }
+                    }
                 }
 
                 newBody += rewrittenLine + '\n';
