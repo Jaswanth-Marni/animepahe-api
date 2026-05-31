@@ -96,7 +96,7 @@ app.get('/api/proxy/m3u8', async (req, res) => {
         // If it's an m3u8 playlist, rewrite internal URLs to also go through the proxy
         if (contentType.includes('mpegurl') || targetUrl.endsWith('.m3u8')) {
             let body = response.data.toString('utf-8');
-            const hostUrl = `${req.protocol}://${req.headers.host}`;
+            const hostUrl = `https://${req.headers.host}`;
 
             // Rewrite absolute URLs in the playlist
             body = body.replace(/^(https?:\/\/[^\s]+)/gm, (match) => {
